@@ -96,3 +96,4 @@ sql_transform*
 data/
 log/
 mnist/
+models/
