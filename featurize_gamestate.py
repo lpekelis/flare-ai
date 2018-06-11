@@ -12,6 +12,8 @@ import pandas as pd
 import structlog
 import tqdm
 
+# TODO(LP): refactor to using methods in featurize_utils
+
 logger = structlog.getLogger(__name__)
 
 GAME_STATE_DIR = '/Users/lpekelis/flare/flare-ai/log/'
@@ -262,10 +264,16 @@ y_entity_damage = y.assign(
 
 now_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-h5f = h5py.File(FEATURES_WRITE_DIR + 'game_states_features_%s.h5' % now_time, 'w')
-h5f.create_dataset('X', data=X)
-h5f.create_dataset('y', data=y)
-h5f.create_dataset('y_entity_damage', data=y_entity_damage)
-h5f.close()
+# h5f = h5py.File(FEATURES_WRITE_DIR + 'game_states_features_%s.h5' % now_time, 'w')
+# h5f.create_dataset('X', data=X)
+# h5f.create_dataset('y', data=y)
+# h5f.create_dataset('y_entity_damage', data=y_entity_damage)
+# h5f.close()
+
+store = pd.HDFStore(FEATURES_WRITE_DIR + 'game_states_features_%s.h5' % now_time)
+store.append('X', X)
+store.append('y', y)
+store.append('y_entity_damage', y_entity_damage)
+store.close()
 
 pickle.dump(game_states, open(FEATURES_WRITE_DIR + 'game_states_%s.p' % now_time, 'wb'))
