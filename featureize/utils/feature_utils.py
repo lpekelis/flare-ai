@@ -1,14 +1,22 @@
 import re
+import sys
 
 import numpy as np
 import pandas as pd
 import structlog
 import tqdm
 
-GAME_STATE_DIR = '/Users/lpekelis/flare/flare-ai/log/'
-MAP_PATH = '/Users/lpekelis/flare/flare-game/mods/flare_ai/maps/testing_grounds.txt'
+sys.path.append("..")
+from ..features.action_features import add_action_features
+from ..features.r_features import add_discounted_R
 
-FEATURES_WRITE_DIR = '/Users/lpekelis/flare/flare-ai/data/'
+logger = structlog.getLogger(__name__)
+
+FLARE_DIR = '/Users/leopekelis/flare/'
+GAME_STATE_DIR = FLARE_DIR + 'flare-ai/log/'
+MAP_PATH = FLARE_DIR + 'flare-game/mods/flare_ai/maps/testing_grounds.txt'
+
+FEATURES_WRITE_DIR = FLARE_DIR + 'flare-ai/data/'
 
 # added as map overlay across enemies
 FEATURES_TO_MAP = ['stats.hp']
@@ -31,7 +39,7 @@ def num_enemies(state):
     for key in state.keys():
         match = re.search('^e(\d+)', key)
         if match:
-            n = max(n, int(match.group(1)))
+            n = max(n, int(match.group(1))+1)
     return n
 
 
@@ -48,21 +56,38 @@ def dist_entities(e1, e2, state):
 def flat_pos(x, y, map_dimensions):
     # Return position in flattened vector from 2d map
 
-    return int(max(min(np.floor(y) * map_dimensions[0] + np.floor(x), np.prod(map_dimensions)), 0))
+    return int(max(min(np.floor(y) * map_dimensions[0] + np.floor(x), np.prod(map_dimensions)-1), 0))
+
+
+def is_alive(hp):
+    hp = float(hp)
+    return hp if np.isnan(hp) else 1.0 * (hp > 0)
+
+
+def companion_feature(e1, e2, feature_name, vision_dimension, state):
+    # compute feature of companion e2, from perspective of e1
+    # if e2 is not within vision_dimension of e1, return nan
+
+    dx, dy = dist_entities(e1, e2, state)
+
+    pos = np.array(vision_dimension)/2 + np.array([dx, dy])
+
+    if np.logical_and(pos >= 0, pos <= vision_dimension).all():
+        val = state['%s->%s' % (e2, feature_name)]
+    else:
+        val = np.nan
+    return pos, val
 
 
 def add_feature_to_relative_overlay(e1, e2, feature_name, state, overlay, overlay_dimensions):
     # overlay is assumed relative to e1
     # e.g. a 10x10 grid centered at e1 location
 
-    dx, dy = dist_entities(e1, e2, state)
+    pos, val = companion_feature(e1, e2, feature_name, overlay_dimensions, state)
 
-    pos = np.array(overlay_dimensions)/2 + np.array([dx, dy])
-
-    if np.logical_and(pos >= 0, pos <= overlay_dimensions).all():
+    if val is not np.nan:
         o_idx = flat_pos(pos[0], pos[1], overlay_dimensions)
-        overlay[o_idx] = state['%s->%s' % (e2, feature_name)]
-
+        overlay[o_idx] = val
     # for debugging
     return pos
 
@@ -72,7 +97,7 @@ def X_from_state(state, n_e=None):
         n_e = num_enemies(state)
 
     X = {}
-    for i in range(0, n_e+1):
+    for i in range(0, n_e):
         row = []
         for f in FEATURES_SELF:
             row.append(state['e%d->%s' % (i, f)])
@@ -89,7 +114,7 @@ def X_from_state(state, n_e=None):
         # allies hp
         allies_hp_overlay = [0] * (VISION_DIMENSIONS[0] * VISION_DIMENSIONS[1])
 
-        for j in range(0, n_e+1):
+        for j in range(0, n_e):
             if j is not i:
                 add_feature_to_relative_overlay('e%d' % i,
                                                 'e%d' % j,
@@ -119,23 +144,40 @@ def y_from_state(state, n_e=None):
         n_e = num_enemies(state)
 
     y = {}
-    for i in range(0, n_e+1):
+    for i in range(0, n_e):
         row = [
             state['e%d->stats.alive' % i],
             state['e%d->stats.hp' % i],
+            is_alive(state['pc->stats.hp']),
             state['pc->stats.hp']
         ]
 
+        for j in range(0, n_e):
+            if j is not i:
+                pos, val_hp = companion_feature('e%d' % i,
+                                                'e%d' % j,
+                                                'stats.hp',
+                                                VISION_DIMENSIONS,
+                                                state
+                                                )
+
+                row = row + [is_alive(val_hp), val_hp]
+
         y[i] = row
 
-    # TODO(Leo): set index name
     y = pd.DataFrame.from_dict(y, orient='index').rename_axis('entity').apply(pd.to_numeric)
 
-    y.columns = [
+    y_columns = [
         'is_entity_alive',
         'entity_hp',
+        'is_pc_alive',
         'pc_hp'
     ]
+
+    for i in range(0, n_e-1):
+        y_columns = y_columns + ['is_companion_%d_alive' % i, 'companion_%d_hp' % i]
+
+    y.columns = y_columns
 
     return y
 
@@ -165,7 +207,7 @@ def time_to_diff(df, diff_col):
     )
 
 
-def yX_from_data(data):
+def yX_from_data(data, type='mdp'):
     # data - list of dicts
 
     y = {}
@@ -178,6 +220,32 @@ def yX_from_data(data):
     y = pd.concat(y, names=['time'])
     X = pd.concat(X, names=['time'])
 
+    if type == 'mdp':
+        return mdp_features(X, y)
+    else:
+        return time_to_diff_features(X, y)
+
+
+def mdp_features(X, y):
+
+    logger.info('Indexing by epoch...')
+    X, y = index_by_epoch(X, y)
+
+    logger.info('Filtering stagnant deaths...')
+    X, y = filter_stagnant_deaths(X, y)
+
+    logger.info('Adding action features...')
+    X, y = add_action_features(X, y)
+    X, y = remove_duplicates_and_align(X, y)
+
+    logger.info('Calculating discounted reward score...')
+    X, y = add_discounted_R(X, y)
+    X, y = remove_duplicates_and_align(X, y)
+
+    return X, y
+
+
+def time_to_diff_features(X, y):
     y2 = (
         y
         .join(
@@ -187,11 +255,13 @@ def yX_from_data(data):
         .reset_index()
     )
 
-    for f in DIFF_Y:
-        y2['time_to_' + f + '_diff'] = time_to_diff(y2, f + '_diff')
-        y2['time_above_median_' + f + '_diff'] = 1*(
-            y2['time_to_' + f + '_diff'] > np.nanmedian(y2['time_to_' + f + '_diff'])
+    for f in tqdm.tqdm(DIFF_Y, total=len(DIFF_Y)):
+        y2[f'time_to_{f}_diff'] = time_to_diff(y2, f + '_diff')
+        y2[f'time_above_median_{f}_diff'] = 1*(
+            y2[f'time_to_{f}_diff'] > np.nanmedian(y2[f'time_to_{f}_diff'])
         )
+        y2[f'time_to_{f}_diff_pctile_10'] = pd.cut(y2[f'time_to_{f}_diff'], bins=10, labels=False)
+        y2[f'time_to_{f}_diff_pctile_100'] = pd.cut(y2[f'time_to_{f}_diff'], bins=100, labels=False)
 
     y2 = y2.set_index(['time', 'entity']).dropna()
     X = X.dropna()
@@ -199,7 +269,7 @@ def yX_from_data(data):
     y2 = y2[y2.index.isin(X.index)]
     X = X[X.index.isin(y2.index)]
 
-    return y2, X
+    return X, y2
 
 
 def load_collision_layer():
@@ -219,3 +289,66 @@ def load_collision_layer():
                     collision_layer.append(line.split(','))
 
     return collision_layer
+
+
+def remove_duplicates_and_align(X, y):
+    X = X.loc[~X.index.duplicated(keep='last'), :]
+    y = y.loc[~y.index.duplicated(keep='last'), :]
+
+    y = y.loc[y.index.isin(X.index), :]
+    X = X.loc[X.index.isin(y.index), :]
+
+    return X, y
+
+
+def index_by_epoch(X, y):
+    # Each time a player dies, entities are reset
+    # Delineate data by player life for accurate reward calculation
+    epoch = (
+        y
+        .groupby('entity')['is_pc_alive']
+        .diff(1)
+        .fillna(0)
+        .clip(lower=0)
+        .groupby('entity')
+        .cumsum()
+        .rename('epoch')
+    )
+
+    y2 = y.join(epoch, how='inner').set_index('epoch', append=True)
+
+    X2 = X.join(epoch, how='inner').set_index('epoch', append=True)
+
+    return X2, y2
+
+
+def filter_stagnant_deaths(X, y):
+    # Remove all event rows for each entity after they have died or the player
+    # died within each epoch
+
+    dead_filter = (
+        y
+        .groupby(['entity', 'epoch'])['is_entity_alive', 'is_pc_alive']
+        .transform(lambda x: np.cumsum(1.0 - x))
+        .query('is_entity_alive <= 1.0')
+        .query('is_pc_alive <= 1.0')
+    )
+
+    y2 = y.join(dead_filter, how='inner', rsuffix='_dead_counter')
+
+    return remove_duplicates_and_align(X, y2)
+
+
+def pctile_assignments(y):
+    outcome_vars = [c for c in y.columns if 'pctile' in c or 'median' in c]
+
+    y_pctile_assignments = {}
+    for outcome_var in outcome_vars:
+        num_outcomes = len(np.unique(y[outcome_var]))
+
+        y_pctile_assignments.update({
+            f'{outcome_var}_{i}': lambda df, i=i: 1*(df[outcome_var] == i)
+            for i in range(num_outcomes)
+        })
+
+    return y.assign(**y_pctile_assignments)

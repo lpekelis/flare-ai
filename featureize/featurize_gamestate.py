@@ -90,8 +90,7 @@ def dist_entities(e1, e2, state):
 
 def flat_pos(x, y, map_dimensions):
     # Return position in flattened vector from 2d map
-
-    return int(max(min(np.floor(y) * map_dimensions[0] + np.floor(x), np.prod(map_dimensions)), 0))
+    return int(max(min(np.floor(y) * map_dimensions[0] + np.floor(x), np.prod(map_dimensions) - 1), 0))
 
 
 def add_feature_to_relative_overlay(e1, e2, feature_name, state, overlay, overlay_dimensions):

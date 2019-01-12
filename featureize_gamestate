@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+
+import click
+import json
+import os
+import pickle
+import time
+from datetime import datetime
+
+import pandas as pd
+import structlog
+import tqdm
+
+from featureize import (
+    FLARE_DIR,
+    pctile_assignments,
+    yX_from_data
+)
+
+logger = structlog.getLogger(__name__)
+
+GAME_STATE_DIR = FLARE_DIR + 'flare-ai/log/'
+MAP_PATH = FLARE_DIR + 'flare-game/mods/flare_ai/maps/testing_grounds.txt'
+FEATURES_WRITE_DIR = FLARE_DIR + 'flare-ai/data/'
+
+MAP_DIMENSIONS = [100, 100]
+
+
+def load_game_states(log_files=None):
+    logger.info('game state files', files=os.listdir(GAME_STATE_DIR))
+
+    game_states = {}
+    for fname in os.listdir(GAME_STATE_DIR):
+        if ('GAME_STATES' in fname and (not log_files or any([f in fname for f in log_files]))):
+            logger.info('add game state file', file=fname)
+            game_state = []
+            with open(GAME_STATE_DIR + fname) as f:
+                for line in f:
+                    game_state.append(json.loads(line))
+            game_states[fname] = game_state
+
+    logger.info('loaded game states: ', num_files=len(game_states))
+    logger.info('game state schema:', state=game_states[fname][0])
+    return game_states
+
+
+def load_collision_layer():
+        collision_layer = []
+        is_collision_layer = False
+
+        with open(MAP_PATH) as f:
+            for line in f:
+                if (('[layer]' in line) and ('type=collision' in next(f, ''))):
+                    line = next(f, '')
+                    line = next(f, '')
+                    is_collision_layer = True
+                if is_collision_layer:
+                    if line == '\n':
+                        is_collision_layer = False
+                    else:
+                        collision_layer.append(line.split(','))
+
+
+@click.command('Featurize gamestate from generated log files',
+               help=f'Args are list of log files to featurize, if blank will featurize all GAME_STATE files.'
+                    f'Files must be located in {GAME_STATE_DIR}')
+@click.argument('log-files', nargs=-1)
+def main(log_files):
+    start_time = time.time()
+
+    game_states = load_game_states(log_files)
+    # Not currently used
+    # collision_layer = load_collision_layer()
+    # collision_layer_flat = [item for sublist in collision_layer for item in sublist]
+
+    ys = {}
+    Xs = {}
+    for file_name, states in game_states.items():
+        print(file_name)
+        y, X = yX_from_data(states)
+        ys[file_name] = y
+        Xs[file_name] = X
+
+    y = pd.concat(ys, names=['log_file'])
+    X = pd.concat(Xs, names=['log_file'])
+
+    logger.info(
+        'Featurized y and X from game states.',
+        min_elapsed=((time.time() - start_time) / 60),
+        y_dim=y.shape,
+        X_dim=X.shape,
+        y0=y.head(1),
+        X0=X.head(1)
+    )
+
+    y_pctile = pctile_assignments(y)
+
+    now_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    store = pd.HDFStore(FEATURES_WRITE_DIR + 'game_states_features_%s.h5' % now_time)
+    store.append('X', X)
+    store.append('y', y)
+    store.append('y_pctile', y_pctile)
+    store.close()
+
+    pickle.dump(game_states, open(FEATURES_WRITE_DIR + 'game_states_%s.p' % now_time, 'wb'))
+
+
+if __name__ == '__main__':
+    logger.info('file paths',
+                game_state_dir=GAME_STATE_DIR,
+                map_path=MAP_PATH,
+                feature_write_dir=FEATURES_WRITE_DIR)
+    logger.info('game state logs', files=os.listdir(GAME_STATE_DIR))
+    main()
