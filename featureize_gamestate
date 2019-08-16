@@ -14,7 +14,7 @@ import tqdm
 from featureize import (
     FLARE_DIR,
     pctile_assignments,
-    yX_from_data
+    Xy_from_data
 )
 
 logger = structlog.getLogger(__name__)
@@ -77,7 +77,7 @@ def main(log_files):
     Xs = {}
     for file_name, states in game_states.items():
         print(file_name)
-        y, X = yX_from_data(states)
+        X, y = Xy_from_data(states)
         ys[file_name] = y
         Xs[file_name] = X
 

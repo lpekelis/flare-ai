@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+
+import os
+from datetime import datetime
+from enum import Enum
+
+import click
+import numpy as np
+import pandas as pd
+import structlog
+
+import tensorflow as tf
+
+from featureize import (
+    define_model_tflearn,
+    define_prediction_model_keras,
+    FLARE_DIR,
+)
+
+logger = structlog.getLogger(__name__)
+
+GAME_STATE_DATA_DIR = FLARE_DIR + 'flare-ai/data/'
+MODEL_WRITE_DIR = FLARE_DIR + 'flare-ai/models/'
+
+
+class Model(Enum):
+    MEDIAN_TIME_TO_DAMAGE = 0
+    MDP_V0 = 1
+
+
+@click.command('Fits tf_model from features file')
+@click.option('--game-state-features-file', default='game_states_features_20180611_002848.h5',
+              help=f'featurized game state file, output of featureize_gamestate.py.'
+                   f'Must be located in {GAME_STATE_DATA_DIR}')
+@click.option('--model-name', default='median_time_to_damage',
+              help=f'Name to save model file. Will be saved in {MODEL_WRITE_DIR}, '
+                   f'and be of format model_name_%Y%m%d-%h%m%s.'
+                   f'Also used to select output variable, see featurize_utils for options')
+@click.option('--model-file', default=None,
+              help=f'Location of saved model. If provided, continue fitting with model as seed,'
+                   f'but will still write to model_name_[CURRENT_TIMESTAMP]. Must be located in {MODEL_WRITE_DIR}')
+def main(game_state_features_file, model_name, model_file):
+    # load data
+    game_state_store = pd.HDFStore(GAME_STATE_DATA_DIR + game_state_features_file)
+    print(game_state_store)
+    X = game_state_store.get('X')
+    # outcome variable
+    y_pctile = game_state_store.get('y_pctile')
+    y = game_state_store.get('y')
+
+    model_name = (
+        Model.MDP_V0 if model_name.startswith('mdp_v0') and model_name.endswith('mdp_v0')
+        else Model.MEDIAN_TIME_TO_DAMAGE
+    )
+
+    model_format = 'keras' if model_name is Model.MDP_V0 else 'tflearn'
+
+    # one time swap of y and X
+    z = X
+    X = y
+    y = z
+
+    if model_name is Model.MDP_V0:
+        outcome = y['R_discount']
+        model = define_prediction_model_keras()
+    else:
+        y_pctile.filter(regex=model_name)
+        outcome = y_pctile
+        model = define_model_tflearn(num_outcomes=outcome.shape[1])
+
+    logger.info('Model setup', X=X.shape, outcome=outcome.shape, model=model)
+
+    if model_file:
+        model.load(MODEL_WRITE_DIR + model_file)
+
+    # Start training (apply gradient descent algorithm)
+    if model_name is Model.MDP_V0:
+        # We start using keras with mdp
+        model.fit(
+            np.array(X, dtype=np.float32),
+            np.array(outcome, dtype=np.float32),
+            epochs=100,
+            batch_size=10000,
+            shuffle=True,
+            validation_split=0.05
+        )
+    else:
+        model.fit(
+            np.array(X, dtype=np.float32),
+            np.array(y_pctile, dtype=np.float32),
+            n_epoch=10,
+            batch_size=16,
+            show_metric=True
+        )
+
+    now_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # TODO(LP): prob need to export to TensorFlow SavedModel format.
+    # Documentation for the SavedModel format can be found here:
+    # https://github.com/tensorflow/tensorflow/blob/master/tensorflow/python/saved_model/README.md
+    # https://gist.github.com/asimshankar/000b8d276f211f972168afa138eb3cc7
+    if model_name is Model.MDP_V0:
+        model.save_weights(f'{MODEL_WRITE_DIR}{model_name}_{now_time}.{model_format}')
+    else:
+        model.save(f'{MODEL_WRITE_DIR}{model_name}_{now_time}.{model_format}')
+
+
+if __name__ == '__main__':
+    print("TensorFlow version: {}".format(tf.VERSION))
+    logger.info('game state data files', files=os.listdir(GAME_STATE_DATA_DIR))
+    main()
