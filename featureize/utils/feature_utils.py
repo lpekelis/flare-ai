@@ -1,5 +1,6 @@
 import re
 import sys
+import typing
 
 import numpy as np
 import pandas as pd
@@ -46,7 +47,7 @@ def num_enemies(state):
 def dist_entities(e1, e2, state):
     # Example:
     # dist_entities('e0','pc',state)
-    # signed distance assumes origin at upper left corner
+    # signed distance assumes origin at upper left corner of geography
     return (
         float(state[e2 + '->stats.pos.x']) - float(state[e1 + '->stats.pos.x']),
         float(state[e2 + '->stats.pos.y']) - float(state[e1 + '->stats.pos.y'])
@@ -55,8 +56,13 @@ def dist_entities(e1, e2, state):
 
 def flat_pos(x, y, map_dimensions):
     # Return position in flattened vector from 2d map
-
     return int(max(min(np.floor(y) * map_dimensions[0] + np.floor(x), np.prod(map_dimensions)-1), 0))
+
+
+def flat_to_2d_pos(flat_pos: int, map_dimensions: typing.List[int]):
+    pos = np.divmod(flat_pos, map_dimensions[0])
+    return (np.clip(pos[1], 0, map_dimensions[0]),
+            np.clip(pos[0], 0, map_dimensions[1]))
 
 
 def is_alive(hp):
@@ -109,9 +115,7 @@ def X_from_state(state, n_e=None):
         dx, dy = dist_entities('e%d' % i, 'pc', state)
         row = row + [dx, dy]
 
-        # TODO(Leo): add overlay features
-
-        # allies hp
+        # allies hp overlay
         allies_hp_overlay = [0] * (VISION_DIMENSIONS[0] * VISION_DIMENSIONS[1])
 
         for j in range(0, n_e):
@@ -207,7 +211,7 @@ def time_to_diff(df, diff_col):
     )
 
 
-def yX_from_data(data, type='mdp'):
+def Xy_from_data(data, type='mdp'):
     # data - list of dicts
 
     y = {}

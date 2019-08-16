@@ -53,3 +53,23 @@ def add_action_features(X: pd.DataFrame, y: pd.DataFrame):
 
     X2 = X.join(action_features, how='inner')
     return X2, y
+
+
+def action_from_feature(row: pd.Series) -> Action:
+    idx = row[action_feature_names()].reset_index(drop=True).idxmax()
+    return Action(idx)
+
+
+def pos_from_action(pos, action):
+    new_pos = pos.rename(lambda x: x + '_end')
+
+    if action == Action.MOVE_NORTH:
+        new_pos = new_pos + [0.0, 1.0]
+    elif action == Action.MOVE_SOUTH:
+        new_pos = new_pos + [0.0, -1.0]
+    elif action == Action.MOVE_EAST:
+        new_pos = new_pos + [1.0, 0.0]
+    elif action == Action.MOVE_WEST:
+        new_pos = new_pos + [-1.0, 0.0]
+
+    return pd.DataFrame(pd.concat([pos, new_pos], axis=0)).T
